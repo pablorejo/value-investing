@@ -1,0 +1,49 @@
+name: Deploy MkDocs to GitHub Pages
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read       # necesario para checkout
+  pages: write         # necesario para publicar
+  id-token: write      # OIDC para Pages
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install MkDocs + plugins
+        run: |
+          pip install mkdocs-material mkdocs-static-i18n
+
+      - name: Build docs
+        working-directory: wiki           # <── carpeta con mkdocs.yml
+        run: mkdocs build --site-dir ../site
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site                      # <── dir creado en el paso anterior
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
