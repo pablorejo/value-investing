@@ -1,0 +1,20 @@
+site_name: Value investing
+
+theme:
+  name: material                # sin más; el plugin ajusta el selector de idioma
+
+plugins:
+  - search                      # recomendado
+  - i18n:
+      docs_structure: folder    # avisamos de que usamos carpetas por idioma
+      languages:
+        - locale: en                     # forma corta = menos ruido
+          name: English
+        - locale: es
+          default: True
+          name: Español
+
+nav:                            # se define UNA sola vez, idioma-agnóstica
+  - Home: index.md
+  - Guide:
+      - Quick start: guide/index.md
