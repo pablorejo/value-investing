@@ -18,3 +18,4 @@ nav:                            # se define UNA sola vez, idioma-agnóstica
   - Home: index.md
   - Guide:
       - Quick start: guide/index.md
+  - Estado del arte: eoa/index.md
