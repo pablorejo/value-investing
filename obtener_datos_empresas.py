@@ -1,3 +1,5 @@
+"""Fetch company financial data from the FMP API and store it."""
+
 import requests
 import pandas as pd
 from sqlalchemy.orm import sessionmaker, Session
@@ -5,7 +7,7 @@ from typing import Any, Dict, Optional, List, Union
 import bbdd
 from conf import *  # Ensure that API_KEY is defined in conf.py
 
-# Constantes para las URLs de la API
+# API URL constants
 API = 'https://financialmodelingprep.com/api/v3/'
 URL_LISTA_EMPRESAS = API + 'stock/list?apikey={api_key}'
 URL_PRECIOS_HISTORICOS = API + 'historical-price-full/{symbol}?apikey={api_key}'
@@ -14,14 +16,16 @@ URL_BALANCE_GENERAL = API + 'balance-sheet-statement/{symbol}?apikey={api_key}'
 URL_CUENTA_RESULTADOS = API + 'income-statement/{symbol}?apikey={api_key}'
 URL_PERFIL_EMPRESA = API + 'profile/{symbol}?apikey={api_key}'
 
-def realizar_peticion(url: str) -> Optional[Dict[str, Any]]:
+
+def make_request(url: str) -> Optional[Dict[str, Any]]:
+    """Perform a GET request and return the JSON body."""
     response = requests.get(url)
     if response.status_code != 200:
-        logging.error(f"Error al realizar la solicitud a la API: {response.status_code}")
+        logging.error(f"API request failed: {response.status_code}")
         logging.debug(response.text)
 
         if response.status_code == 429:
-            logging.error("Se ha alcanzado el límite de solicitudes a la API.")
+            logging.error("API rate limit reached.")
             exit(1)
         return None
     data = response.json()
@@ -30,22 +34,28 @@ def realizar_peticion(url: str) -> Optional[Dict[str, Any]]:
         logging.debug(url)
     return data
 
-def error_no_data(data: Any, tipo: str) -> None:
-    logging.warning(f'No se encontraron datos de {tipo}')
+
+def log_no_data(data: Any, kind: str) -> None:
+    """Log a warning when no data was returned for a specific report."""
+    logging.warning(f'No data found for {kind}')
     return None
 
-def obtener_lista_empresas(api_key: str, solo_eeuu: bool = False) -> List[Dict[str, Any]]:
-    url = URL_LISTA_EMPRESAS.format(api_key=api_key)
-    empresas = realizar_peticion(url)
-    if not empresas:
-        return []
-    if solo_eeuu:
-        empresas = [empresa for empresa in empresas if empresa.get('exchangeShortName') in ['NYSE', 'NASDAQ']]
-    return empresas
 
-def obtener_precios_historicos(session: Session, api_key: str, symbol: str) -> Optional[pd.DataFrame]:
+def get_company_list(api_key: str, only_us: bool = False) -> List[Dict[str, Any]]:
+    """Retrieve the list of companies from the API."""
+    url = URL_LISTA_EMPRESAS.format(api_key=api_key)
+    companies = make_request(url)
+    if not companies:
+        return []
+    if only_us:
+        companies = [c for c in companies if c.get('exchangeShortName') in ['NYSE', 'NASDAQ']]
+    return companies
+
+
+def get_historical_prices(session: Session, api_key: str, symbol: str) -> Optional[pd.DataFrame]:
+    """Fetch and store yearly price statistics for a symbol."""
     url = URL_PRECIOS_HISTORICOS.format(symbol=symbol, api_key=api_key)
-    data = realizar_peticion(url)
+    data = make_request(url)
 
     if data and 'historical' in data:
         # Convertir los datos históricos en un DataFrame
@@ -83,130 +93,144 @@ def obtener_precios_historicos(session: Session, api_key: str, symbol: str) -> O
         precios_anuales['price_change_pct_3m'] = mean_close_quarterly.pct_change(periods=1).resample('Y').last()
         precios_anuales['price_change_pct_6m'] = mean_close_semiannually.pct_change(periods=1).resample('Y').last()
 
-        # Guardar en la base de datos
-        for anio, precios in precios_anuales.iterrows():
-            bbdd.guardar_anio_fiscal(session=session, symbol=symbol, anio=anio.year, precios=precios.to_dict())
+        # Store in the database
+        for year, prices in precios_anuales.iterrows():
+            bbdd.save_fiscal_year(session=session, symbol=symbol, year=year.year, prices=prices.to_dict())
 
         return precios_anuales
 
-    logging.debug(f"No se encontraron datos históricos para {symbol}")
+    logging.debug(f"No historical data found for {symbol}")
     return None
 
-def obtener_precio_por_fecha(precios_df: pd.DataFrame, fecha: str) -> Optional[float]:
-    fecha = pd.to_datetime(fecha)
-    if precios_df.empty:
-        logging.debug("El DataFrame está vacío.")
+
+def get_price_by_date(prices_df: pd.DataFrame, date: str) -> Optional[float]:
+    """Return the closing price closest to ``date``."""
+    date = pd.to_datetime(date)
+    if prices_df.empty:
+        logging.debug("DataFrame is empty.")
         return None
-    precios_df = precios_df.sort_index()
-    pos = precios_df.index.searchsorted(fecha)
+    prices_df = prices_df.sort_index()
+    pos = prices_df.index.searchsorted(date)
     if pos == 0:
-        fecha_mas_cercana = precios_df.index[0]
-    elif pos >= len(precios_df.index):
-        fecha_mas_cercana = precios_df.index[-1]
+        closest = prices_df.index[0]
+    elif pos >= len(prices_df.index):
+        closest = prices_df.index[-1]
     else:
-        fecha_anterior = precios_df.index[pos - 1]
-        fecha_siguiente = precios_df.index[pos]
-        fecha_mas_cercana = fecha_anterior if (fecha - fecha_anterior) <= (fecha_siguiente - fecha) else fecha_siguiente
-    precio_cierre = precios_df.loc[fecha_mas_cercana, 'close']
-    logging.info(f"El precio de cierre más cercano a {fecha.date()} es el de {fecha_mas_cercana.date()}: {precio_cierre}")
-    return precio_cierre
+        prev_date = prices_df.index[pos - 1]
+        next_date = prices_df.index[pos]
+        closest = prev_date if (date - prev_date) <= (next_date - date) else next_date
+    close_price = prices_df.loc[closest, 'close']
+    logging.info(f"Closing price near {date.date()} is {close_price} on {closest.date()}")
+    return close_price
 
-def obtener_cash_flow_fmp(session: Session, api_key: str, symbol: str, guardar_base_de_datos: bool = True) -> Optional[List[Dict[str, Any]]]:
+
+def get_cash_flow_fmp(session: Session, api_key: str, symbol: str, save_db: bool = True) -> Optional[List[Dict[str, Any]]]:
+    """Retrieve cash flow statements from FMP."""
     url = URL_CASH_FLOW.format(symbol=symbol, api_key=api_key)
-    data = realizar_peticion(url)
+    data = make_request(url)
     if not data:
-        return error_no_data(data, 'flujo de caja')
-    if guardar_base_de_datos:
+        return log_no_data(data, 'cash flow')
+    if save_db:
         for report in data:
             with session:
-                bbdd.guardar_cash_flow(session=session, report=report)
+                bbdd.save_cash_flow(session=session, report=report)
     return data
 
-def obtener_balance_general_fmp(session: Session, api_key: str, symbol: str, guardar_base_de_datos: bool = True) -> Optional[List[Dict[str, Any]]]:
+
+def get_balance_sheet_fmp(session: Session, api_key: str, symbol: str, save_db: bool = True) -> Optional[List[Dict[str, Any]]]:
+    """Retrieve balance sheets from FMP."""
     url = URL_BALANCE_GENERAL.format(symbol=symbol, api_key=api_key)
-    data = realizar_peticion(url)
+    data = make_request(url)
     if not data:
-        return error_no_data(data, 'balance general')
-    if guardar_base_de_datos:
+        return log_no_data(data, 'balance sheet')
+    if save_db:
         for report in data:
             with session:
-                bbdd.guardar_balance_general(session, report)
+                bbdd.save_balance_sheet(session, report)
     return data
 
-def obtener_cuenta_resultados_fmp(session: Session, api_key: str, symbol: str, guardar_base_de_datos: bool = True) -> Optional[List[Dict[str, Any]]]:
+
+def get_income_statement_fmp(session: Session, api_key: str, symbol: str, save_db: bool = True) -> Optional[List[Dict[str, Any]]]:
+    """Retrieve income statements from FMP."""
     url = URL_CUENTA_RESULTADOS.format(symbol=symbol, api_key=api_key)
-    data = realizar_peticion(url)
+    data = make_request(url)
     if not data:
-        return error_no_data(data, 'cuenta de resultados')
-    if guardar_base_de_datos:
+        return log_no_data(data, 'income statement')
+    if save_db:
         for report in data:
             with session:
-                bbdd.guardar_cuenta_resultados(session=session, report=report)
+                bbdd.save_income_statement(session=session, report=report)
     return data
 
-def obtener_informacion_empresa(session: Session, api_key: str, symbol: str, guardar_base_de_datos: bool = True) -> Union[None, Dict[str, Any]]:
+
+def get_company_info(session: Session, api_key: str, symbol: str, save_db: bool = True) -> Union[None, Dict[str, Any]]:
+    """Retrieve basic company information."""
     url = URL_PERFIL_EMPRESA.format(symbol=symbol, api_key=api_key)
-    data = realizar_peticion(url)
+    data = make_request(url)
     if not data:
         return None
-    empresa = data[0]
-    if guardar_base_de_datos:
-        bbdd.guardar_empresa(session, empresa)
-    return empresa
+    company = data[0]
+    if save_db:
+        bbdd.save_company(session, company)
+    return company
 
-def procesar_empresa(session: Session, symbol: str) -> bool:
+
+def process_company(session: Session, symbol: str) -> bool:
+    """Download and store all available reports for ``symbol``."""
     try:
-        logging.info(f"Procesando empresa con símbolo: {symbol}")
-        empresa = obtener_informacion_empresa(session, api_key=API_KEY, symbol=symbol)
-        if not empresa:
-            logging.warning(f"No se pudo obtener información para la empresa: {symbol}")
+        logging.info(f"Processing company: {symbol}")
+        company = get_company_info(session, api_key=API_KEY, symbol=symbol)
+        if not company:
+            logging.warning(f"No data for company: {symbol}")
             return False
-        obtener_precios_historicos(session,API_KEY, symbol)
-        obtener_cash_flow_fmp(session, API_KEY, symbol)
-        obtener_balance_general_fmp(session, API_KEY, symbol)
-        obtener_cuenta_resultados_fmp(session, API_KEY, symbol)
-        logging.info(f"Empresa procesada correctamente: {symbol}")
+        get_historical_prices(session, API_KEY, symbol)
+        get_cash_flow_fmp(session, API_KEY, symbol)
+        get_balance_sheet_fmp(session, API_KEY, symbol)
+        get_income_statement_fmp(session, API_KEY, symbol)
+        logging.info(f"Company processed: {symbol}")
         return True
     except Exception as e:
-        logging.error(f"Error al procesar la empresa {symbol}: {e}")
+        logging.error(f"Failed to process {symbol}: {e}")
         logging.error(traceback.format_exc())
         session.rollback()
         return False
 
+
 def main() -> None:
-    bbdd.crear_tablas(ELIMINAR_BBDD)
+    """Entry point for fetching and storing company data."""
+    bbdd.create_tables(ELIMINAR_BBDD)
 
     Session = sessionmaker(bind=bbdd.engine)
 
     try:
         if OBTENER_EMPRESAS_CON_API:
-            empresas = obtener_lista_empresas(API_KEY, True)
-            if not empresas:
-                logging.error("No se obtuvieron empresas desde la API.")
+            companies = get_company_list(API_KEY, True)
+            if not companies:
+                logging.error("No companies returned from the API.")
                 return
-            logging.info(f"Empresas obtenidas de la API: {len(empresas)}")
-            df_empresas = pd.DataFrame(empresas)
+            logging.info(f"Companies obtained from API: {len(companies)}")
+            df_empresas = pd.DataFrame(companies)
             df_empresas.to_csv(fichero_lista_empresas, index=False)
         else:
             if not os.path.exists(fichero_lista_empresas):
-                logging.error(f"No se encontró el archivo: {fichero_lista_empresas}")
+                logging.error(f"File not found: {fichero_lista_empresas}")
                 return
             df_empresas = pd.read_csv(fichero_lista_empresas)
         with Session() as session:
             for _, empresa in df_empresas.iterrows():
                 symbol = empresa.get('symbol')
                 if not symbol:
-                    logging.warning(f"Símbolo no encontrado para empresa: {empresa}")
+                    logging.warning(f"Symbol not found for company: {empresa}")
                     continue
-                procesar_empresa(session, symbol)
+                process_company(session, symbol)
                 session.commit()
     except KeyboardInterrupt:
-        logging.info("Interrupción del usuario. Saliendo...")
+        logging.info("Execution interrupted by user.")
     except Exception as e:
-        logging.error(f"Error crítico durante el procesamiento: {e}")
+        logging.error(f"Critical error during processing: {e}")
         logging.error(traceback.format_exc())
     finally:
-        logging.info("Ejecución finalizada.")
+        logging.info("Execution finished.")
 
 if __name__ == "__main__":
     main()

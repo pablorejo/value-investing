@@ -12,7 +12,7 @@ import pandas as pd
 Session = sessionmaker(bind=bbdd.engine)
 with Session() as session:
     # Extraer los datos de la base
-    df = bbdd.extraer_todos_datos(session=session)
+    df = bbdd.extract_all_data(session=session)
 
     # Eliminar filas con valores nulos
     df = df.dropna()
